@@ -516,6 +516,22 @@ DAG_SPECS = [
         "max_active_tasks": 16,
     },
 
+# CONFIGURE A DAG TO CLEAN UP THE WORKING SPACE
+    
+
+        {
+        "dag_id": "WORKING_DIRECTORY_CLEANUP",
+        "schedule": "15 6-18 * * *",  # hourly
+        "start_date": datetime(2025, 8, 24, 6, 22, tzinfo=LOCAL_TZ),
+        "jobs": [{"task_id": "WORKING_DIRECTORY_CLEANUP", 
+                  "script": "delete_redcap_log_files.py"}],
+        "edges": [],
+        "tags": ["Cleanup Task",  "external-script"],
+        "retries": 5,
+        "retry_delay_minutes": 5,
+        "max_active_runs": 8,
+        "max_active_tasks": 16,
+    },
 
 
 ]
