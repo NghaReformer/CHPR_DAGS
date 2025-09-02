@@ -521,7 +521,8 @@ DAG_SPECS = [
 
         {
         "dag_id": "WORKING_DIRECTORY_CLEANUP",
-        "schedule": "15 6-18 * * *",  # hourly
+        "schedule": "*/15 6-18 * * *",  # every 15 minutes from 6 to 18
+
         "start_date": datetime(2025, 8, 24, 6, 22, tzinfo=LOCAL_TZ),
         "jobs": [{"task_id": "WORKING_DIRECTORY_CLEANUP", 
                   "script": "delete_redcap_log_files.py"}],
