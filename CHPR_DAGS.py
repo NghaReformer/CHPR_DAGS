@@ -537,6 +537,24 @@ DAG_SPECS = [
     },
 
 
+# CONFIGURE THE IMAGE QUALITY STUDY PIPELINE
+    {
+        "dag_id": "IMAGE_QUALITY_STUDY_PIPELINE",
+        "schedule": "0 6-18 * * *",  # hourly
+        "start_date": datetime(2025, 8, 24, 6, 30, tzinfo=LOCAL_TZ),
+        "jobs": [{"task_id": "IMAGE_QUALITY_STUDY_IMPORTATION", 
+                  "script": "IMAGE_QUALITY_STUDY/IMAGE_QUALITY_STUDY_IMPORTATION.py"},
+                  {"task_id": "IMAGE_QUALITY_STUDY_PROCESSING", 
+                   "script": "IMAGE_QUALITY_STUDY/IMAGE_QUALITY_STUDY_PROCESSING.py"}
+                  ],
+        "edges": [ ("IMAGE_QUALITY_STUDY_IMPORTATION", "IMAGE_QUALITY_STUDY_PROCESSING")],
+        "tags": ["Image Quality Study", "pipeline", "external-script"],
+        "retries": 2,
+        "retry_delay_minutes": 5,
+        "max_active_runs": 8,
+        "max_active_tasks": 16,
+    },
+
 ]
 
 # ============================= REGISTER DAGS ================================
