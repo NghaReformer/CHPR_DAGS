@@ -561,9 +561,9 @@ DAG_SPECS = [
         "schedule": "0 6-18 * * *",  # hourly
         "start_date": datetime(2025, 8, 24, 6, 30, tzinfo=LOCAL_TZ),
         "jobs": [{"task_id": "GHIT_IMPORTATION", 
-                  "script": "GHIT_DATA/GHIT_DATA_IMPORTATION.py"},
+                  "script": "GHIT_PROJECT/GHIT_DATA_IMPORTATION.py"},
                   {"task_id": "GHIT_PROCESSING", 
-                   "script": "GHIT_DATA/GHIT_DATA_PROCESSING.py"}
+                   "script": "GHIT_PROJECT/GHIT_DATA_PROCESSING.py"}
                   ],
         "edges": [ ("GHIT_IMPORTATION", "GHIT_PROCESSING")],
         "tags": ["GHIT", "FUJILAM II", "pipeline", "external-script"],
