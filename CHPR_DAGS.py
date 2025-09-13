@@ -22,6 +22,8 @@ except Exception:  # Airflow < 3 fallback
 
 from airflow.models.taskinstance import TaskInstance
 from airflow.models.dagrun import DagRun
+from airflow.operators.python import ShortCircuitOperator
+from airflow.sensors.base import BaseSensorOperator
 
 # ================================ CONFIG ====================================
 EMAILS = ["nghan@chprhealth.org", "ngha.mbuh@gmail.com"]
@@ -52,6 +54,72 @@ def _get_cfg_runtime(name: str, default: str | None = None) -> str:
     if default is not None:
         return default
     raise RuntimeError(f"Missing config: {name} (set env/Variable '{name}' or '{name.upper()}')")
+
+def _normalize_path_for_env(path_str: str) -> str:
+    """Best-effort normalization so a Windows drive path works under WSL.
+    - If path like 'D:\\folder\\file' and running on POSIX, convert to '/mnt/d/folder/file'.
+    - Otherwise return as-is.
+    """
+    try:
+        if os.name != "nt" and len(path_str) >= 3 and path_str[1:3] == ":\\":
+            drive = path_str[0].lower()
+            rest = path_str[3:].replace("\\", "/")
+            return f"/mnt/{drive}/{rest}"
+    except Exception:
+        pass
+    return path_str
+
+
+class FileMtimeSensor(BaseSensorOperator):
+    """Rescheduling sensor that fires when a file/dir mtime increases.
+    Stores baseline in Variable on first run to avoid a false positive.
+    """
+
+    def __init__(self, path: str, var_key: str, watch_dir: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.path = path
+        self.var_key = var_key
+        self.watch_dir = watch_dir
+
+    def _latest_mtime(self) -> float:
+        p = Path(self.path)
+        if not p.exists():
+            return -1.0
+        if self.watch_dir:
+            latest = -1.0
+            try:
+                for sub in p.rglob("*"):
+                    try:
+                        if sub.is_file():
+                            latest = max(latest, sub.stat().st_mtime)
+                    except Exception:
+                        continue
+            except Exception:
+                latest = max(latest, p.stat().st_mtime)
+            return latest
+        else:
+            return p.stat().st_mtime
+
+    def poke(self, context) -> bool:
+        mtime = self._latest_mtime()
+        if mtime < 0:
+            self.log.info("Watch path not found yet: %s", self.path)
+            return False
+        try:
+            prev_val = Variable.get(self.var_key, default_var=None)
+            if prev_val is None:
+                Variable.set(self.var_key, str(mtime))
+                self.log.info("Baseline set for %s => %.6f", self.path, mtime)
+                return False
+            prev = float(prev_val)
+        except Exception:
+            prev = 0.0
+        changed = mtime > prev
+        self.log.info(
+            "MTime watch: path=%s current=%.6f prev=%.6f changed=%s",
+            self.path, mtime, prev, changed,
+        )
+        return bool(changed)
 
 # =============================== CALLBACKS ==================================
 def on_failure_notify(context):
@@ -119,6 +187,13 @@ def build_script_dag(
     queue: str | None = None,
     priority_weight: int | None = None,
     doc_md: str | None = None,
+    # Optional: only run tasks if a file/dir changed since last success
+    file_change_watch_path: str | None = None,           # direct absolute path (file or dir)
+    file_change_watch_path_key: str | None = None,       # env/Variable key that yields a base directory
+    file_change_watch_file: str | None = None,           # join with base directory
+    file_change_variable_key: str | None = None,
+    trigger_on_change_immediately: bool = False,         # use rescheduling sensor + @continuous
+    file_change_poke_interval_seconds: int = 5,
 ):
     if tags is None:
         tags = ["external-script"]
@@ -160,6 +235,79 @@ def build_script_dag(
     @dag(**dag_kwargs)
     def _factory_dag():
         logger = logging.getLogger(f"airflow.task.{dag_id}")
+
+        # --------------------- Resolve watch path (optional) -----------------
+        resolved_watch_path: str | None = None
+        watch_is_dir = False
+        if file_change_watch_path or file_change_watch_path_key:
+            if file_change_watch_path:
+                resolved_watch_path = _normalize_path_for_env(file_change_watch_path)
+            else:
+                base_dir = _get_cfg_runtime(file_change_watch_path_key)  # dynamic, cross-platform
+                candidate = Path(base_dir)
+                if file_change_watch_file:
+                    candidate = candidate / file_change_watch_file
+                resolved_watch_path = _normalize_path_for_env(str(candidate))
+            try:
+                watch_is_dir = Path(resolved_watch_path).is_dir()
+            except Exception:
+                watch_is_dir = False
+
+        # ------------------------- File-change wait --------------------------
+        sensor_task = None
+        guard_task = None
+        if resolved_watch_path:
+            var_key = file_change_variable_key or f"{dag_id}__last_mtime"
+
+            if trigger_on_change_immediately:
+                # Wait for change (reschedules, no worker slot consumed)
+                sensor_task = FileMtimeSensor(
+                    task_id="wait_for_specimen_trigger_change",
+                    path=resolved_watch_path,
+                    var_key=var_key,
+                    watch_dir=watch_is_dir,
+                    mode="reschedule",
+                    poke_interval=file_change_poke_interval_seconds,
+                )
+            else:
+                # Fallback to simple guard that only runs jobs if changed
+                def _should_run_if_changed() -> bool:
+                    try:
+                        p = Path(resolved_watch_path)
+                        if not p.exists():
+                            logger.warning("Guard: path not found, skipping run. Path=%s", p)
+                            return False
+                        def latest(path: Path) -> float:
+                            if path.is_file():
+                                return path.stat().st_mtime
+                            latest_ = -1.0
+                            for sub in path.rglob("*"):
+                                try:
+                                    if sub.is_file():
+                                        latest_ = max(latest_, sub.stat().st_mtime)
+                                except Exception:
+                                    continue
+                            return max(latest_, path.stat().st_mtime)
+                        mtime = latest(p)
+                        try:
+                            prev = float(Variable.get(var_key, default_var="0"))
+                        except Exception:
+                            prev = 0.0
+                        changed = mtime > prev
+                        logger.info(
+                            "Guard check: path=%s current_mtime=%s prev_mtime=%s changed=%s",
+                            p, mtime, prev, changed,
+                        )
+                        return bool(changed)
+                    except Exception as e:
+                        logger.exception("Guard check failed; defaulting to skip. %s", e)
+                        return False
+
+                guard_task = ShortCircuitOperator(
+                    task_id="proceed_if_changed",
+                    python_callable=_should_run_if_changed,
+                    dag=None,
+                )
 
         @task(
             execution_timeout=timedelta(minutes=execution_timeout_minutes),
@@ -274,7 +422,13 @@ def build_script_dag(
                     kw["priority_weight"] = priority_weight
                 op = op.override(**kw)
 
-            task_map[t_id] = op.override(task_id=t_id)(script_rel, job_args)
+            task_node = op.override(task_id=t_id)(script_rel, job_args)
+            # If guard/sensor enabled, gate each job behind it
+            if sensor_task is not None:
+                sensor_task >> task_node
+            elif guard_task is not None:
+                guard_task >> task_node
+            task_map[t_id] = task_node
 
         # ---- validate / apply edges ----
         for u, v in edges:
@@ -282,6 +436,34 @@ def build_script_dag(
                 known = ", ".join(sorted(task_map.keys()))
                 raise ValueError(f"Invalid edge {u} -> {v}. Known tasks: [{known}]")
             task_map[u] >> task_map[v]
+
+        # If guard enabled, add final recorder to persist latest mtime only on success
+        if (sensor_task is not None or guard_task is not None) and resolved_watch_path:
+            var_key_local = file_change_variable_key or f"{dag_id}__last_mtime"
+
+            @task(trigger_rule="all_success")
+            def record_latest_mtime():
+                p = Path(resolved_watch_path)
+                if p.exists():
+                    if p.is_file():
+                        mtime = p.stat().st_mtime
+                    else:
+                        latest = -1.0
+                        for sub in p.rglob("*"):
+                            try:
+                                if sub.is_file():
+                                    latest = max(latest, sub.stat().st_mtime)
+                            except Exception:
+                                continue
+                        mtime = max(latest, p.stat().st_mtime)
+                    Variable.set(var_key_local, str(mtime))
+                    logger.info("Recorded latest mtime %.6f to Variable '%s' for %s", mtime, var_key_local, p)
+                else:
+                    logger.warning("Recorder: file no longer exists; not updating mtime. %s", p)
+
+            rec = record_latest_mtime()
+            for _t in task_map.values():
+                _t >> rec
 
     return _factory_dag()
 
@@ -571,6 +753,30 @@ DAG_SPECS = [
         "retry_delay_minutes": 5,
         "max_active_runs": 8,
         "max_active_tasks": 16,
+    },
+
+# CONFIGURE FOR THE SPECIMEN TRANSPORT STUDY PIPELINE
+# to run every 30 minutes between 6am and 6pm
+    {
+        "dag_id": "SPECIMEN_TRANSPORT_PIPELINE",
+        "schedule": "@continuous",  # event-driven: wait for change
+        "start_date": datetime(2025, 8, 24, 6, 30, tzinfo=LOCAL_TZ),
+        "jobs": [{"task_id": "SPECIMEN_TRANSPORT_IMPORTATION", 
+                  "script": "SPECIMEN_TRANSPORT/SPECIMEN_TRANSPORT_IMPORTATION.py"},
+                  {"task_id": "SPECIMEN_TRANSPORT_PROCESSING", 
+                   "script": "SPECIMEN_TRANSPORT/SPECIMEN_TRANSPORT_PROCESSING.py"}
+                  ],
+        "edges": [ ("SPECIMEN_TRANSPORT_IMPORTATION", "SPECIMEN_TRANSPORT_PROCESSING")], # ,
+        "tags": ["Specimen Transport", "pipeline", "external-script"],
+        "retries": 2,
+        "retry_delay_minutes": 5,
+        "max_active_runs": 1,
+        "max_active_tasks": 16,
+        # Wait for changes in the dynamic cross-platform directory + file
+        "file_change_watch_path_key": "base_path",
+        "file_change_watch_file": "Bamenda Center for Health Promotion and Research/Data Management - CROSS_PROJECT_DATA/SPECIMEN_TRANSPORTATION/FLOW_TRIGGER_SPECIMEN_TRANSPORT/dag_trigger_stp.csv",
+        "trigger_on_change_immediately": True,
+        "file_change_poke_interval_seconds": 5,
     },
 
 
