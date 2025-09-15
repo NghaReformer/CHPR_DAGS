@@ -690,7 +690,7 @@ DAG_SPECS = [
             {"task_id": "LAB_PDF_IMPORTATION",
              "script": "PDF_PROJECT/PDF GENERATION DATA IMPORTATION.py"},
             {"task_id": "LAB_PDF_CLEANING",
-             "script": "PDF_PROJECT/PDF_GENERATION_PROCESSING_ONLY.py"},
+             "script": "PDF_PROJECT/PDF GENERATION PROCESSING.py"},
         ],
         "edges": [("LAB_PDF_IMPORTATION", "LAB_PDF_CLEANING")],
         "tags": ["Lab PDF generation", "pipeline", "external-script", "Importation", "Cleaning"],
@@ -722,7 +722,7 @@ DAG_SPECS = [
 # CONFIGURE THE IMAGE QUALITY STUDY PIPELINE
     {
         "dag_id": "IMAGE_QUALITY_STUDY_PIPELINE",
-        "schedule": "0 6-18 * * *",  # hourly
+        "schedule": "@continuous", #    "0 6-18 * * *",  # hourly
         "start_date": datetime(2025, 8, 24, 6, 30, tzinfo=LOCAL_TZ),
         "jobs": [{"task_id": "IMAGE_QUALITY_STUDY_IMPORTATION", 
                   "script": "IMAGE_QUALITY_STUDY/IMAGE_QUALITY_STUDY_IMPORTATION.py"},
@@ -735,12 +735,17 @@ DAG_SPECS = [
         "retry_delay_minutes": 5,
         "max_active_runs": 8,
         "max_active_tasks": 16,
+        # Wait for changes in the dynamic cross-platform directory + file
+        "file_change_watch_path_key": "base_path",
+        "file_change_watch_file": "Bamenda Center for Health Promotion and Research/Data Management -  IMAGE_QUALITY_STUDY/TRIGGER_PATH/dag_trigger_IQS.csv",
+        "trigger_on_change_immediately": True,
+        "file_change_poke_interval_seconds": 5,
     },
 
 # CONFIGURE FOR THE GHIT FUJILAM II STUDY PIPELINE
     {
         "dag_id": "FUJILAM_II_STUDY_PIPELINE",
-        "schedule": "0 6-18 * * *",  # hourly
+        "schedule": "@continuous", #   "0 6-18 * * *",  # hourly
         "start_date": datetime(2025, 8, 24, 6, 30, tzinfo=LOCAL_TZ),
         "jobs": [{"task_id": "GHIT_IMPORTATION", 
                   "script": "GHIT_PROJECT/GHIT_DATA_IMPORTATION.py"},
@@ -753,6 +758,11 @@ DAG_SPECS = [
         "retry_delay_minutes": 5,
         "max_active_runs": 8,
         "max_active_tasks": 16,
+        # Wait for changes in the dynamic cross-platform directory + file
+        "file_change_watch_path_key": "base_path",
+        "file_change_watch_file": "Bamenda Center for Health Promotion and Research/Data Management -  GHIT_DATA/GHIT_TRIGGER_PATH/dag_trigger_FL2.csv",
+        "trigger_on_change_immediately": True,
+        "file_change_poke_interval_seconds": 5,
     },
 
 # CONFIGURE FOR THE SPECIMEN TRANSPORT STUDY PIPELINE
