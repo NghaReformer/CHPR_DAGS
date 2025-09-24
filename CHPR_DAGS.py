@@ -101,25 +101,62 @@ class FileMtimeSensor(BaseSensorOperator):
             return p.stat().st_mtime
 
     def poke(self, context) -> bool:
-        mtime = self._latest_mtime()
-        if mtime < 0:
-            self.log.info("Watch path not found yet: %s", self.path)
-            return False
         try:
-            prev_val = Variable.get(self.var_key, default_var=None)
-            if prev_val is None:
-                Variable.set(self.var_key, str(mtime))
-                self.log.info("Baseline set for %s => %.6f", self.path, mtime)
+            mtime = self._latest_mtime()
+            if mtime < 0:
+                self.log.info("Watch path not found yet (will keep checking): %s", self.path)
                 return False
-            prev = float(prev_val)
-        except Exception:
-            prev = 0.0
-        changed = mtime > prev
-        self.log.info(
-            "MTime watch: path=%s current=%.6f prev=%.6f changed=%s",
-            self.path, mtime, prev, changed,
-        )
-        return bool(changed)
+
+            # Get previous mtime from Airflow Variable
+            try:
+                # Try the newer API first, then fall back to older API
+                try:
+                    prev_val = Variable.get(self.var_key, default_var=None)
+                except TypeError:
+                    # Fallback for older Airflow versions that don't support default_var
+                    try:
+                        prev_val = Variable.get(self.var_key)
+                    except KeyError:
+                        prev_val = None
+
+                if prev_val is None:
+                    # First time - establish baseline
+                    Variable.set(self.var_key, str(mtime))
+                    self.log.info("Baseline established for %s (var_key: %s) => mtime=%.6f",
+                                self.path, self.var_key, mtime)
+                    return False
+                prev = float(prev_val)
+            except Exception as e:
+                self.log.warning("Failed to get previous mtime from variable '%s': %s. Using default 0.0",
+                               self.var_key, e)
+                prev = 0.0
+
+            # If this is the first run (prev=0.0), establish baseline and don't trigger
+            if prev == 0.0:
+                try:
+                    Variable.set(self.var_key, str(mtime))
+                    self.log.info("Baseline established for %s (var_key: %s) => mtime=%.6f (first run)",
+                                self.path, self.var_key, mtime)
+                    return False
+                except Exception as e:
+                    self.log.error("Failed to set baseline variable '%s': %s", self.var_key, e)
+
+            changed = mtime > prev
+            self.log.info(
+                "File watch check: path=%s var_key=%s current_mtime=%.6f prev_mtime=%.6f changed=%s watch_dir=%s",
+                self.path, self.var_key, mtime, prev, changed, self.watch_dir
+            )
+
+            if changed:
+                self.log.info("🔥 TRIGGER DETECTED! Path changed: %s (%.6f > %.6f)",
+                            self.path, mtime, prev)
+
+            return bool(changed)
+
+        except Exception as e:
+            self.log.exception("Error during file watch poke operation for path %s: %s", self.path, e)
+            # Return False to keep trying rather than failing the sensor
+            return False
 
 # =============================== CALLBACKS ==================================
 def on_failure_notify(context):
@@ -240,29 +277,51 @@ def build_script_dag(
         resolved_watch_path: str | None = None
         watch_is_dir = False
         if file_change_watch_path or file_change_watch_path_key:
-            if file_change_watch_path:
-                resolved_watch_path = _normalize_path_for_env(file_change_watch_path)
-            else:
-                base_dir = _get_cfg_runtime(file_change_watch_path_key)  # dynamic, cross-platform
-                candidate = Path(base_dir)
-                if file_change_watch_file:
-                    candidate = candidate / file_change_watch_file
-                resolved_watch_path = _normalize_path_for_env(str(candidate))
             try:
-                watch_is_dir = Path(resolved_watch_path).is_dir()
-            except Exception:
+                if file_change_watch_path:
+                    resolved_watch_path = _normalize_path_for_env(file_change_watch_path)
+                    logger.info("DAG %s: Using direct watch path: %s", dag_id, resolved_watch_path)
+                else:
+                    base_dir = _get_cfg_runtime(file_change_watch_path_key)  # dynamic, cross-platform
+                    candidate = Path(base_dir)
+                    if file_change_watch_file:
+                        candidate = candidate / file_change_watch_file
+                    resolved_watch_path = _normalize_path_for_env(str(candidate))
+                    logger.info("DAG %s: Resolved watch path from base_dir '%s' + file '%s' = %s",
+                              dag_id, base_dir, file_change_watch_file or "(none)", resolved_watch_path)
+
+                # Check if path exists and determine type
+                watch_path_obj = Path(resolved_watch_path)
+                if watch_path_obj.exists():
+                    watch_is_dir = watch_path_obj.is_dir()
+                    logger.info("DAG %s: Watch path exists, is_dir=%s: %s", dag_id, watch_is_dir, resolved_watch_path)
+                else:
+                    # Path doesn't exist yet - try to infer from extension or assume directory
+                    watch_is_dir = not bool(watch_path_obj.suffix)  # No extension = likely directory
+                    logger.warning("DAG %s: Watch path does not exist yet, assuming is_dir=%s: %s",
+                                 dag_id, watch_is_dir, resolved_watch_path)
+            except Exception as e:
+                logger.exception("DAG %s: Failed to resolve watch path configuration: %s", dag_id, e)
+                resolved_watch_path = None
                 watch_is_dir = False
 
         # ------------------------- File-change wait --------------------------
         sensor_task = None
         guard_task = None
         if resolved_watch_path:
-            var_key = file_change_variable_key or f"{dag_id}__last_mtime"
+            # Create a unique variable key for each DAG's file watching
+            if file_change_variable_key:
+                var_key = file_change_variable_key
+            else:
+                # Include path hash to make it unique across different watched paths
+                import hashlib
+                path_hash = hashlib.md5(resolved_watch_path.encode()).hexdigest()[:8]
+                var_key = f"{dag_id}__mtime__{path_hash}"
 
             if trigger_on_change_immediately:
                 # Wait for change (reschedules, no worker slot consumed)
                 sensor_task = FileMtimeSensor(
-                    task_id="wait_for_specimen_trigger_change",
+                    task_id=f"wait_for_change__{dag_id}",
                     path=resolved_watch_path,
                     var_key=var_key,
                     watch_dir=watch_is_dir,
@@ -290,9 +349,29 @@ def build_script_dag(
                             return max(latest_, path.stat().st_mtime)
                         mtime = latest(p)
                         try:
-                            prev = float(Variable.get(var_key, default_var="0"))
+                            # Try the newer API first, then fall back to older API
+                            try:
+                                prev_val = Variable.get(var_key, default_var="0")
+                            except TypeError:
+                                # Fallback for older Airflow versions
+                                try:
+                                    prev_val = Variable.get(var_key)
+                                except KeyError:
+                                    prev_val = "0"
+                            prev = float(prev_val)
                         except Exception:
                             prev = 0.0
+
+                        # If this is the first run (prev=0.0), establish baseline and don't trigger
+                        if prev == 0.0:
+                            try:
+                                Variable.set(var_key, str(mtime))
+                                logger.info("Guard: Baseline established for %s (var_key: %s) => mtime=%.6f (first run)",
+                                          p, var_key, mtime)
+                                return False
+                            except Exception as e:
+                                logger.error("Guard: Failed to set baseline variable '%s': %s", var_key, e)
+
                         changed = mtime > prev
                         logger.info(
                             "Guard check: path=%s current_mtime=%s prev_mtime=%s changed=%s",
@@ -439,9 +518,10 @@ def build_script_dag(
 
         # If guard enabled, add final recorder to persist latest mtime only on success
         if (sensor_task is not None or guard_task is not None) and resolved_watch_path:
-            var_key_local = file_change_variable_key or f"{dag_id}__last_mtime"
+            # Use the same variable key as defined earlier
+            var_key_local = var_key
 
-            @task(trigger_rule="all_success")
+            @task(task_id=f"record_mtime__{dag_id}", trigger_rule="all_success")
             def record_latest_mtime():
                 p = Path(resolved_watch_path)
                 if p.exists():
@@ -690,7 +770,7 @@ DAG_SPECS = [
             {"task_id": "LAB_PDF_IMPORTATION",
              "script": "PDF_PROJECT/PDF GENERATION DATA IMPORTATION.py"},
             {"task_id": "LAB_PDF_CLEANING",
-             "script": "PDF_PROJECT/PDF GENERATION PROCESSING.py"},
+             "script": "PDF_PROJECT/PDF GENERATION PROCESSING.py"}, 
         ],
         "edges": [("LAB_PDF_IMPORTATION", "LAB_PDF_CLEANING")],
         "tags": ["Lab PDF generation", "pipeline", "external-script", "Importation", "Cleaning"],
@@ -722,7 +802,7 @@ DAG_SPECS = [
 # CONFIGURE THE IMAGE QUALITY STUDY PIPELINE
     {
         "dag_id": "IMAGE_QUALITY_STUDY_PIPELINE",
-        "schedule": "@continuous", #    "0 6-18 * * *",  # hourly
+        "schedule":  "0 6-18 * * *",  # hourly "@continuous", #  
         "start_date": datetime(2025, 8, 24, 6, 30, tzinfo=LOCAL_TZ),
         "jobs": [{"task_id": "IMAGE_QUALITY_STUDY_IMPORTATION", 
                   "script": "IMAGE_QUALITY_STUDY/IMAGE_QUALITY_STUDY_IMPORTATION.py"},
@@ -736,16 +816,16 @@ DAG_SPECS = [
         "max_active_runs": 8,
         "max_active_tasks": 16,
         # Wait for changes in the dynamic cross-platform directory + file
-        "file_change_watch_path_key": "base_path",
-        "file_change_watch_file": "Bamenda Center for Health Promotion and Research/Data Management -  IMAGE_QUALITY_STUDY/TRIGGER_PATH/dag_trigger_IQS.csv",
-        "trigger_on_change_immediately": True,
-        "file_change_poke_interval_seconds": 5,
+        # "file_change_watch_path_key": "base_path",
+        # "file_change_watch_file": "Bamenda Center for Health Promotion and Research/Data Management - IMAGE_QUALITY_STUDY/TRIGGER_PATH/dag_trigger_IQS.csv",
+        # "trigger_on_change_immediately": True,
+        # "file_change_poke_interval_seconds": 5,
     },
 
 # CONFIGURE FOR THE GHIT FUJILAM II STUDY PIPELINE
     {
         "dag_id": "FUJILAM_II_STUDY_PIPELINE",
-        "schedule": "@continuous", #   "0 6-18 * * *",  # hourly
+        "schedule": "0 6-18 * * *",  # hourly
         "start_date": datetime(2025, 8, 24, 6, 30, tzinfo=LOCAL_TZ),
         "jobs": [{"task_id": "GHIT_IMPORTATION", 
                   "script": "GHIT_PROJECT/GHIT_DATA_IMPORTATION.py"},
@@ -759,17 +839,17 @@ DAG_SPECS = [
         "max_active_runs": 8,
         "max_active_tasks": 16,
         # Wait for changes in the dynamic cross-platform directory + file
-        "file_change_watch_path_key": "base_path",
-        "file_change_watch_file": "Bamenda Center for Health Promotion and Research/Data Management -  GHIT_DATA/GHIT_TRIGGER_PATH/dag_trigger_FL2.csv",
-        "trigger_on_change_immediately": True,
-        "file_change_poke_interval_seconds": 5,
+        # "file_change_watch_path_key": "base_path",
+        # "file_change_watch_file": "Bamenda Center for Health Promotion and Research/Data Management - GHIT_DATA/GHIT_TRIGGER_PATH/dag_trigger_FL2.csv",
+        # "trigger_on_change_immediately": True,
+        # "file_change_poke_interval_seconds": 5,
     },
 
 # CONFIGURE FOR THE SPECIMEN TRANSPORT STUDY PIPELINE
 # to run every 30 minutes between 6am and 6pm
     {
         "dag_id": "SPECIMEN_TRANSPORT_PIPELINE",
-        "schedule": "@continuous",  # event-driven: wait for change
+        "schedule":  "*/15 6-18 * * *",  # every 15 minutes from 6 to 18"@continuous",  # event-driven: wait for change
         "start_date": datetime(2025, 8, 24, 6, 30, tzinfo=LOCAL_TZ),
         "jobs": [{"task_id": "SPECIMEN_TRANSPORT_IMPORTATION", 
                   "script": "SPECIMEN_TRANSPORT/SPECIMEN_TRANSPORT_IMPORTATION.py"},
@@ -780,13 +860,13 @@ DAG_SPECS = [
         "tags": ["Specimen Transport", "pipeline", "external-script"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 1,
+        "max_active_runs": 8,
         "max_active_tasks": 16,
         # Wait for changes in the dynamic cross-platform directory + file
-        "file_change_watch_path_key": "base_path",
-        "file_change_watch_file": "Bamenda Center for Health Promotion and Research/Data Management - CROSS_PROJECT_DATA/SPECIMEN_TRANSPORTATION/FLOW_TRIGGER_SPECIMEN_TRANSPORT/dag_trigger_stp.csv",
-        "trigger_on_change_immediately": True,
-        "file_change_poke_interval_seconds": 5,
+        # "file_change_watch_path_key": "base_path",
+        # "file_change_watch_file": "Bamenda Center for Health Promotion and Research/Data Management - CROSS_PROJECT_DATA/SPECIMEN_TRANSPORTATION/FLOW_TRIGGER_SPECIMEN_TRANSPORT/dag_trigger_stp.csv",
+        # "trigger_on_change_immediately": True,
+        # "file_change_poke_interval_seconds": 5,
     },
 
 
