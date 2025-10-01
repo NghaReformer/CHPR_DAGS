@@ -12,7 +12,7 @@ from typing import Iterable, Mapping, Any
 from pathlib import Path
 
 import pendulum
-from airflow.decorators import dag, task
+from airflow.sdk import dag, task
 from airflow.exceptions import AirflowException
 try:
     # Airflow 3 style
@@ -22,8 +22,8 @@ except Exception:  # Airflow < 3 fallback
 
 from airflow.models.taskinstance import TaskInstance
 from airflow.models.dagrun import DagRun
-from airflow.operators.python import ShortCircuitOperator
-from airflow.sensors.base import BaseSensorOperator
+from airflow.providers.standard.operators.python import ShortCircuitOperator
+from airflow.sdk.bases.sensor import BaseSensorOperator
 
 # ================================ CONFIG ====================================
 EMAILS = ["nghan@chprhealth.org", "ngha.mbuh@gmail.com"]
@@ -557,14 +557,15 @@ DAG_SPECS = [
     {
         "dag_id": "wave11_user_activity_runner",
         "schedule": "*/30 6-18 * * *",
-        "start_date": datetime(2025, 8, 24, 6, 7, tzinfo=LOCAL_TZ),
+        "start_date": datetime(2025, 8, 24, 6, 0, tzinfo=LOCAL_TZ),
         "jobs": [{"task_id": "user_activity", "script": "WAVE11_PROJECT/WAVE11_USER_ACTIVITY.py"}],
         "edges": [],
         "tags": ["wave11", "external-script"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
     },
 
 # WAVE11 PIPELINE
@@ -572,7 +573,7 @@ DAG_SPECS = [
     {
         "dag_id": "WAVE11_PIPELINE",
         "schedule": "0 6-18 * * *",  # hourly at HH:00 between 06:00–18:00
-        "start_date": datetime(2025, 8, 24, 6, 15, tzinfo=LOCAL_TZ),
+        "start_date": datetime(2025, 8, 24, 6, 5, tzinfo=LOCAL_TZ),
         "jobs": [
             {"task_id": "wave11_data_importer",  "script": "WAVE11_PROJECT/WAVE11_DATA_IMPORTATION.py"},
             {"task_id": "wave11_data_processor", "script": "WAVE11_PROJECT/WAVE11_DATA_PROCESSING.py"},
@@ -581,8 +582,9 @@ DAG_SPECS = [
         "tags": ["wave11", "pipeline"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
     },
 
 
@@ -592,7 +594,7 @@ DAG_SPECS = [
     {
         "dag_id": "WAVE11_REPORTS",
         "schedule": "5 6-18/3 * * *",                     # 06:05, 09:05, 12:05, 15:05, 18:05
-        "start_date": datetime(2025, 8, 24, 6, 5, tzinfo=LOCAL_TZ),
+        "start_date": datetime(2025, 8, 24, 6, 10, tzinfo=LOCAL_TZ),
         "catchup": False,
         "jobs": [
             {
@@ -609,10 +611,9 @@ DAG_SPECS = [
         "tags": ["wave11", "reports", "external-script"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        # Keep this only if your Airflow supports per-DAG max_active_tasks; otherwise
-        # set core.max_active_tasks_per_dag in airflow.cfg.
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
     },
 
 
@@ -621,15 +622,16 @@ DAG_SPECS = [
     {
         "dag_id": "GLOBAL_OUTCOME_USER_ACTIVITY_MONITORING",
         "schedule": "*/30 6-18 * * *",
-        "start_date": datetime(2025, 8, 24, 6, 19, tzinfo=LOCAL_TZ),
+        "start_date": datetime(2025, 8, 24, 6, 15, tzinfo=LOCAL_TZ),
         "jobs": [{"task_id": "global_outcome_user_activity",
                   "script": "GLOBAL_OUTCOME_PROJECT/GLOBAL_OUTCOME_USER_ACTIVITY_MONITORING.py"}],
         "edges": [],
         "tags": ["global_outcome", "user_activity", "external-script"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
     },
 
 # CONFIGURE THE GLOBAL OUTCOME PIPELINE
@@ -637,7 +639,7 @@ DAG_SPECS = [
     {
         "dag_id": "GLOBAL_OUTCOME_PIPELINE",
         "schedule": "0 6-18 * * *",  # hourly
-        "start_date": datetime(2025, 8, 24, 6, 17, tzinfo=LOCAL_TZ),
+        "start_date": datetime(2025, 8, 24, 6, 20, tzinfo=LOCAL_TZ),
         "jobs": [
             {"task_id": "global_outcome_import",
              "script": "GLOBAL_OUTCOME_PROJECT/GLOBAL_OUTCOME_IMPORTAION.py"},
@@ -648,15 +650,16 @@ DAG_SPECS = [
         "tags": ["global_outcome", "pipeline", "external-script"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
     },
 
 
     {
         "dag_id": "GLOBAL_OUTCOME_REPORTS",
         "schedule": "5 6-18/3 * * *",                     # 06:05, 09:05, 12:05, 15:05, 18:05
-        "start_date": datetime(2025, 8, 24, 6, 5, tzinfo=LOCAL_TZ),
+        "start_date": datetime(2025, 8, 24, 6, 25, tzinfo=LOCAL_TZ),
         "catchup": False,
         "jobs": [
             {
@@ -672,10 +675,9 @@ DAG_SPECS = [
         "tags": ["global_outcome", "reports", "external-script"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        # Keep this only if your Airflow supports per-DAG max_active_tasks; otherwise
-        # set core.max_active_tasks_per_dag in airflow.cfg.
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
     },
 
 
@@ -684,15 +686,16 @@ DAG_SPECS = [
     {
         "dag_id": "VIRAL_LOAD_USER_ACTIVITY",
         "schedule": "*/30 6-18 * * *",
-        "start_date": datetime(2025, 8, 24, 6, 13, tzinfo=LOCAL_TZ),
+        "start_date": datetime(2025, 8, 24, 6, 30, tzinfo=LOCAL_TZ),
         "jobs": [{"task_id": "viral_load_user_activity",
                   "script": "VIRAL_LOAD_PROJECT/VIRAL_LOAD_USER_ACTIVITY.py"}],
         "edges": [],
         "tags": ["viral_load", "user_activity", "external-script"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
     },
 
 # CONFIGURE THE VIRAL LOAD PIPELINE
@@ -700,7 +703,7 @@ DAG_SPECS = [
     {
         "dag_id": "VIRAL_LOAD_PIPELINE",
         "schedule": "*/30 6-18 * * *",
-        "start_date": datetime(2025, 8, 24, 6, 18, tzinfo=LOCAL_TZ),
+        "start_date": datetime(2025, 8, 24, 6, 35, tzinfo=LOCAL_TZ),
         "jobs": [
             {"task_id": "viral_load_import",
              "script": "VIRAL_LOAD_PROJECT/VIRAL_LOAD_IMPORTATION_SCRIPTS.py"},
@@ -711,8 +714,9 @@ DAG_SPECS = [
         "tags": ["viral_load", "pipeline", "external-script"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
     },
 
 # CONFIGURE VIRAL LOAD REPORT IMPORTATION
@@ -720,7 +724,7 @@ DAG_SPECS = [
     {
         "dag_id": "VIRAL_LOAD_REPORTS",
         "schedule": "5 6-18/3 * * *",                     # 06:05, 09:05, 12:05, 15:05, 18:05
-        "start_date": datetime(2025, 8, 24, 6, 5, tzinfo=LOCAL_TZ),
+        "start_date": datetime(2025, 8, 24, 6, 40, tzinfo=LOCAL_TZ),
         "catchup": False,
         "jobs": [
             {
@@ -737,10 +741,9 @@ DAG_SPECS = [
         "tags": ["viral_load", "reports", "external-script"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        # Keep this only if your Airflow supports per-DAG max_active_tasks; otherwise
-        # set core.max_active_tasks_per_dag in airflow.cfg.
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
     },
 
 
@@ -749,15 +752,16 @@ DAG_SPECS = [
     {
         "dag_id": "XPERT_PROCESSING",
         "schedule": "0 6-18 * * *",  # hourly
-        "start_date": datetime(2025, 8, 24, 6, 22, tzinfo=LOCAL_TZ),
-        "jobs": [{"task_id": "XPERT_DATA_PROCESSING", 
+        "start_date": datetime(2025, 8, 24, 6, 45, tzinfo=LOCAL_TZ),
+        "jobs": [{"task_id": "XPERT_DATA_PROCESSING",
                   "script": "XPERT_PROJECT/XPERT_PROCESSING.py"}],
         "edges": [],
         "tags": ["xpert", "pipeline", "external-script"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
     },
 
 # CONFIGURE THE LAB PDF PIPELINE
@@ -765,19 +769,20 @@ DAG_SPECS = [
     {
         "dag_id": "LAB_PDF_PIPELINE",
         "schedule": "*/30 6-18 * * *",
-        "start_date": datetime(2025, 8, 24, 6, 25, tzinfo=LOCAL_TZ),
+        "start_date": datetime(2025, 8, 24, 6, 50, tzinfo=LOCAL_TZ),
         "jobs": [
             {"task_id": "LAB_PDF_IMPORTATION",
              "script": "PDF_PROJECT/PDF GENERATION DATA IMPORTATION.py"},
             {"task_id": "LAB_PDF_CLEANING",
-             "script": "PDF_PROJECT/PDF GENERATION PROCESSING.py"}, 
+             "script": "PDF_PROJECT/PDF GENERATION PROCESSING.py"},
         ],
         "edges": [("LAB_PDF_IMPORTATION", "LAB_PDF_CLEANING")],
         "tags": ["Lab PDF generation", "pipeline", "external-script", "Importation", "Cleaning"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
     },
 
 # CONFIGURE A DAG TO CLEAN UP THE WORKING SPACE
@@ -787,34 +792,36 @@ DAG_SPECS = [
         "dag_id": "WORKING_DIRECTORY_CLEANUP",
         "schedule": "*/15 6-18 * * *",  # every 15 minutes from 6 to 18
 
-        "start_date": datetime(2025, 8, 24, 6, 22, tzinfo=LOCAL_TZ),
-        "jobs": [{"task_id": "WORKING_DIRECTORY_CLEANUP", 
+        "start_date": datetime(2025, 8, 24, 6, 55, tzinfo=LOCAL_TZ),
+        "jobs": [{"task_id": "WORKING_DIRECTORY_CLEANUP",
                   "script": "delete_redcap_log_files.py"}],
         "edges": [],
         "tags": ["Cleanup Task",  "external-script"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
     },
 
 
 # CONFIGURE THE IMAGE QUALITY STUDY PIPELINE
     {
         "dag_id": "IMAGE_QUALITY_STUDY_PIPELINE",
-        "schedule":  "0 6-18 * * *",  # hourly "@continuous", #  
-        "start_date": datetime(2025, 8, 24, 6, 30, tzinfo=LOCAL_TZ),
-        "jobs": [{"task_id": "IMAGE_QUALITY_STUDY_IMPORTATION", 
+        "schedule":  "0 6-18 * * *",  # hourly "@continuous", #
+        "start_date": datetime(2025, 8, 24, 7, 0, tzinfo=LOCAL_TZ),
+        "jobs": [{"task_id": "IMAGE_QUALITY_STUDY_IMPORTATION",
                   "script": "IMAGE_QUALITY_STUDY/IMAGE_QUALITY_STUDY_IMPORTATION.py"},
-                  {"task_id": "IMAGE_QUALITY_STUDY_PROCESSING", 
+                  {"task_id": "IMAGE_QUALITY_STUDY_PROCESSING",
                    "script": "IMAGE_QUALITY_STUDY/IMAGE_QUALITY_STUDY_PROCESSING.py"}
                   ],
         "edges": [ ("IMAGE_QUALITY_STUDY_IMPORTATION", "IMAGE_QUALITY_STUDY_PROCESSING")],
         "tags": ["Image Quality Study", "pipeline", "external-script"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
         # Wait for changes in the dynamic cross-platform directory + file
         # "file_change_watch_path_key": "base_path",
         # "file_change_watch_file": "Bamenda Center for Health Promotion and Research/Data Management - IMAGE_QUALITY_STUDY/TRIGGER_PATH/dag_trigger_IQS.csv",
@@ -826,18 +833,19 @@ DAG_SPECS = [
     {
         "dag_id": "FUJILAM_II_STUDY_PIPELINE",
         "schedule": "0 6-18 * * *",  # hourly
-        "start_date": datetime(2025, 8, 24, 6, 30, tzinfo=LOCAL_TZ),
-        "jobs": [{"task_id": "GHIT_IMPORTATION", 
+        "start_date": datetime(2025, 8, 24, 7, 3, tzinfo=LOCAL_TZ),
+        "jobs": [{"task_id": "GHIT_IMPORTATION",
                   "script": "GHIT_PROJECT/GHIT_DATA_IMPORTATION.py"},
-                  {"task_id": "GHIT_PROCESSING", 
+                  {"task_id": "GHIT_PROCESSING",
                    "script": "GHIT_PROJECT/GHIT_DATA_PROCESSING.py"}
                   ],
         "edges": [ ("GHIT_IMPORTATION", "GHIT_PROCESSING")],
         "tags": ["GHIT", "FUJILAM II", "pipeline", "external-script"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
         # Wait for changes in the dynamic cross-platform directory + file
         # "file_change_watch_path_key": "base_path",
         # "file_change_watch_file": "Bamenda Center for Health Promotion and Research/Data Management - GHIT_DATA/GHIT_TRIGGER_PATH/dag_trigger_FL2.csv",
@@ -845,23 +853,49 @@ DAG_SPECS = [
         # "file_change_poke_interval_seconds": 5,
     },
 
+# CONFIGURE FOR THE GHIT USER ACTIVITY
+    {
+        "dag_id": "FUJILAM_USER_ACTIVITY_MONITORING",
+        "schedule": "*/45 6-18 * * *",  # every 45 minutes from 6 to 18
+        "start_date": datetime(2025, 8, 24, 7, 7, tzinfo=LOCAL_TZ),
+        "jobs": [{"task_id": "GHIT_USER_ACTIVITY",
+                  "script": "GHIT_PROJECT/GHIT_USER_ACTIVITY.py"}
+
+                  ],
+        "edges": [],
+        "tags": ["GHIT", "USER ACTIVITY", "FUJILAM II", "pipeline", "external-script"],
+        "retries": 2,
+        "retry_delay_minutes": 5,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
+        # Wait for changes in the dynamic cross-platform directory + file
+        # "file_change_watch_path_key": "base_path",
+        # "file_change_watch_file": "Bamenda Center for Health Promotion and Research/Data Management - GHIT_DATA/GHIT_TRIGGER_PATH/dag_trigger_FL2.csv",
+        # "trigger_on_change_immediately": True,
+        # "file_change_poke_interval_seconds": 5,
+    },
+
+
+
 # CONFIGURE FOR THE SPECIMEN TRANSPORT STUDY PIPELINE
 # to run every 30 minutes between 6am and 6pm
     {
         "dag_id": "SPECIMEN_TRANSPORT_PIPELINE",
         "schedule":  "*/15 6-18 * * *",  # every 15 minutes from 6 to 18"@continuous",  # event-driven: wait for change
-        "start_date": datetime(2025, 8, 24, 6, 30, tzinfo=LOCAL_TZ),
-        "jobs": [{"task_id": "SPECIMEN_TRANSPORT_IMPORTATION", 
+        "start_date": datetime(2025, 8, 24, 7, 13, tzinfo=LOCAL_TZ),
+        "jobs": [{"task_id": "SPECIMEN_TRANSPORT_IMPORTATION",
                   "script": "SPECIMEN_TRANSPORT/SPECIMEN_TRANSPORT_IMPORTATION.py"},
-                  {"task_id": "SPECIMEN_TRANSPORT_PROCESSING", 
+                  {"task_id": "SPECIMEN_TRANSPORT_PROCESSING",
                    "script": "SPECIMEN_TRANSPORT/SPECIMEN_TRANSPORT_PROCESSING.py"}
                   ],
         "edges": [ ("SPECIMEN_TRANSPORT_IMPORTATION", "SPECIMEN_TRANSPORT_PROCESSING")], # ,
         "tags": ["Specimen Transport", "pipeline", "external-script"],
         "retries": 2,
         "retry_delay_minutes": 5,
-        "max_active_runs": 8,
-        "max_active_tasks": 16,
+        "max_active_runs": 2,
+        "max_active_tasks": 4,
+        "pool": "data_import_pool",
         # Wait for changes in the dynamic cross-platform directory + file
         # "file_change_watch_path_key": "base_path",
         # "file_change_watch_file": "Bamenda Center for Health Promotion and Research/Data Management - CROSS_PROJECT_DATA/SPECIMEN_TRANSPORTATION/FLOW_TRIGGER_SPECIMEN_TRANSPORT/dag_trigger_stp.csv",
