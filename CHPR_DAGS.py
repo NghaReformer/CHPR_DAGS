@@ -29,7 +29,7 @@ from airflow.sdk.bases.sensor import BaseSensorOperator
 EMAILS = ["nghan@chprhealth.org", "ngha.mbuh@gmail.com"]
 LOCAL_TZ = pendulum.timezone("Africa/Douala")
 DEFAULT_ARTIFACTS_DIR = "/tmp/airflow_artifacts"
-DEFAULT_SCRIPTS_DIR = "/mnt/d/SCRIPTS_PATH"   # override with env/Variable 'script_path'
+DEFAULT_SCRIPTS_DIR = "/mnt/d/SCRIPTS_PATH/inspiretb"   # override with env/Variable 'script_path'
 
 # ================================ UTILS =====================================
 def _get_cfg_runtime(name: str, default: str | None = None) -> str:
@@ -37,16 +37,17 @@ def _get_cfg_runtime(name: str, default: str | None = None) -> str:
     Resolve config at RUNTIME with this priority:
       1) env[name] or env[name.upper()]
       2) Airflow Variable[name] or Variable[name.upper()]
+      
       3) default (if given) else raise
     """
     env_val = os.environ.get(name) or os.environ.get(name.upper())
     if env_val:
         return env_val
     try:
-        var_val = Variable.get(name, default_var=None)
+        var_val = Variable.get(name, default=None)
         if var_val:
             return var_val
-        var_val_uc = Variable.get(name.upper(), default_var=None)
+        var_val_uc = Variable.get(name.upper(), default=None)
         if var_val_uc:
             return var_val_uc
     except Exception:
@@ -109,11 +110,11 @@ class FileMtimeSensor(BaseSensorOperator):
 
             # Get previous mtime from Airflow Variable
             try:
-                # Try the newer API first, then fall back to older API
+                # Try the Airflow 3.1 API with 'default' parameter
                 try:
-                    prev_val = Variable.get(self.var_key, default_var=None)
+                    prev_val = Variable.get(self.var_key, default=None)
                 except TypeError:
-                    # Fallback for older Airflow versions that don't support default_var
+                    # Fallback for older Airflow versions that don't support default parameter
                     try:
                         prev_val = Variable.get(self.var_key)
                     except KeyError:
@@ -179,7 +180,7 @@ def on_failure_notify(context):
         f"*Log*: {ti.log_url if ti else 'n/a'}"
     )
 
-    slack_conn_id = os.environ.get("SLACK_WEBHOOK_CONN_ID") or Variable.get("SLACK_WEBHOOK_CONN_ID", default_var=None)
+    slack_conn_id = os.environ.get("SLACK_WEBHOOK_CONN_ID") or Variable.get("SLACK_WEBHOOK_CONN_ID", default=None)
     if slack_conn_id:
         try:
             from airflow.providers.slack.hooks.slack_webhook import SlackWebhookHook
@@ -189,7 +190,7 @@ def on_failure_notify(context):
         except Exception as e:
             log.warning("Slack via connection failed: %s", e)
 
-    slack_webhook = os.environ.get("SLACK_WEBHOOK") or Variable.get("SLACK_WEBHOOK", default_var=None)
+    slack_webhook = os.environ.get("SLACK_WEBHOOK") or Variable.get("SLACK_WEBHOOK", default=None)
     if slack_webhook:
         try:
             import requests
@@ -349,9 +350,9 @@ def build_script_dag(
                             return max(latest_, path.stat().st_mtime)
                         mtime = latest(p)
                         try:
-                            # Try the newer API first, then fall back to older API
+                            # Try the Airflow 3.1 API with 'default' parameter
                             try:
-                                prev_val = Variable.get(var_key, default_var="0")
+                                prev_val = Variable.get(var_key, default="0")
                             except TypeError:
                                 # Fallback for older Airflow versions
                                 try:
@@ -445,6 +446,8 @@ def build_script_dag(
             tail = deque(maxlen=200)
             rc = None
             try:
+                # Pass environment variables to subprocess
+                # This ensures systemd-set vars (BASE_PATH, script_path, PYTHONPATH) are inherited
                 with subprocess.Popen(
                     cmd,
                     cwd=run_dir,
@@ -454,6 +457,7 @@ def build_script_dag(
                     encoding="utf-8",
                     errors="replace",
                     bufsize=1,
+                    env=os.environ.copy(),  # CRITICAL: Pass environment variables to subprocess
                 ) as proc:
                     assert proc.stdout is not None
                     for line in proc.stdout:
